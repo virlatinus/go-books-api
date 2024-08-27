@@ -20,6 +20,27 @@ type Book struct {
 	Year   int    `json:"year" gorm:"not null"`
 }
 
+type StatusResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type PaginationResponse struct {
+	TotalRecords int  `json:"total_records"`
+	CurrentPage  int  `json:"current_page"`
+	TotalPages   int  `json:"total_pages"`
+	NextPage     *int `json:"next_page"`
+	PrevPage     *int `json:"prev_page"`
+	PageSize     int  `json:"page_size"`
+}
+
+type Response struct {
+	Status     StatusResponse      `json:"status"`
+	Data       interface{}         `json:"data"`
+	Errors     []string            `json:"errors"`
+	Pagination *PaginationResponse `json:"pagination"`
+}
+
 var db *gorm.DB
 
 func main() {
@@ -57,6 +78,7 @@ func main() {
 
 	router := mux.NewRouter()
 	router.Use(httplog.Logger)
+	router.Use(commonMiddleware)
 	router.HandleFunc("/books", getBooks).Methods("GET")
 	router.HandleFunc("/books/{id}", getBook).Methods("GET")
 	router.HandleFunc("/books", addBook).Methods("POST")
@@ -67,143 +89,162 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8000", router))
 }
 
+func commonMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Type", "application/json")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func logError(w http.ResponseWriter, err error, statusCode int) bool {
+	if err != nil {
+		w.WriteHeader(statusCode)
+		_ = json.NewEncoder(w).Encode(Response{
+			Status: StatusResponse{
+				Code:    statusCode,
+				Message: "error",
+			},
+			Errors: []string{err.Error()},
+		})
+		return true
+	}
+	return false
+}
+
+func sendResponse(w http.ResponseWriter, statusCode int, response Response) bool {
+	w.WriteHeader(statusCode)
+	err := json.NewEncoder(w).Encode(Response{
+		Status: StatusResponse{
+			Code:    statusCode,
+			Message: "success",
+		},
+		Data:       response.Data,
+		Pagination: response.Pagination,
+	})
+	return !logError(w, err, http.StatusInternalServerError)
+}
+
 func getBooks(w http.ResponseWriter, r *http.Request) {
 	var books []Book
 	err := db.Find(&books).Error
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusInternalServerError) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(books)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	sendResponse(w, http.StatusOK, Response{
+		Data: books,
+		Pagination: &PaginationResponse{
+			TotalRecords: len(books),
+			CurrentPage:  1,
+			TotalPages:   1,
+			NextPage:     nil,
+			PrevPage:     nil,
+			PageSize:     len(books),
+		},
+	})
 }
 
 func getBook(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(mux.Vars(r)["id"])
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusBadRequest) {
 		return
 	}
+
 	var book Book
 	err = db.First(&book, id).Error
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+	if logError(w, err, http.StatusNotFound) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(book)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
-		return
-	}
+
+	sendResponse(w, http.StatusOK, Response{
+		Data: book,
+	})
 }
 
 func addBook(w http.ResponseWriter, r *http.Request) {
 	var book Book
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&book)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusBadRequest) {
 		return
 	}
 
 	err = db.Create(&book).Error
-	if err != nil {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusConflict) {
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
+	sendResponse(w, http.StatusCreated, Response{
+		Data: book,
+	})
 }
 
 func addBooks(w http.ResponseWriter, r *http.Request) {
 	var books []Book
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&books)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusBadRequest) {
 		return
 	}
 
 	result := db.Create(&books)
-	if result.Error != nil {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(result.Error.Error()))
+	if logError(w, result.Error, http.StatusConflict) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_, _ = w.Write([]byte(fmt.Sprintf("{\"message\": \"%d books added\"}\n", result.RowsAffected)))
+	sendResponse(w, http.StatusCreated, Response{
+		Data: books,
+	})
 }
 
 func updateBook(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(mux.Vars(r)["id"])
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusBadRequest) {
 		return
 	}
 
 	var book Book
 	err = db.First(&book, id).Error
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+	if logError(w, err, http.StatusNotFound) {
 		return
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	err = decoder.Decode(&book)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusBadRequest) {
 		return
 	}
 
-	book.ID = uint(id)
+	book.ID = uint(id) // preserve ID from params
 
 	err = db.Save(&book).Error
-	if err != nil {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusConflict) {
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	sendResponse(w, http.StatusOK, Response{
+		Data: book,
+	})
 }
 
 func deleteBook(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(mux.Vars(r)["id"])
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusBadRequest) {
 		return
 	}
 
 	var book Book
 	err = db.First(&book, id).Error
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+	if logError(w, err, http.StatusNotFound) {
 		return
 	}
 
 	err = db.Delete(&book).Error
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(err.Error()))
+	if logError(w, err, http.StatusInternalServerError) {
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	sendResponse(w, http.StatusOK, Response{
+		Data: book,
+	})
 }
