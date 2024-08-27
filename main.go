@@ -3,32 +3,42 @@ package main
 import (
 	"encoding/json"
 	"github.com/MadAppGang/httplog"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/jmoiron/sqlx"
 	"log"
 	"net/http"
-	"slices"
 	"strconv"
+	"time"
 )
 
 type Book struct {
-	ID     int    `json:"id"`
-	Title  string `json:"title"`
-	Author string `json:"author"`
-	Year   int    `json:"year"`
+	ID     int    `json:"id" db:"id"`
+	Title  string `json:"title" db:"title"`
+	Author string `json:"author" db:"author"`
+	Year   int    `json:"year" db:"year"`
 }
 
-var books []Book
+var db *sqlx.DB
 
 func main() {
 	router := mux.NewRouter()
 
-	books = append(books,
-		Book{ID: 1, Title: "1984", Author: "George Orwell", Year: 1949},
-		Book{ID: 2, Title: "To Kill a Mockingbird", Author: "Harper Lee", Year: 1960},
-		Book{ID: 3, Title: "The Great Gatsby", Author: "F. Scott Fitzgerald", Year: 1925},
-		Book{ID: 4, Title: "Pride and Prejudice", Author: "Jane Austen", Year: 1813},
-		Book{ID: 5, Title: "The Catcher in the Rye", Author: "J.D. Salinger", Year: 1951},
-	)
+	var err error
+	db, err = sqlx.Connect("mysql", "books:books@/books")
+	if err != nil {
+		panic(err)
+	}
+	db.SetConnMaxLifetime(time.Minute * 3)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(10)
+	defer func(db *sqlx.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
 
 	router.Use(httplog.Logger)
 	router.HandleFunc("/books", getBooks).Methods("GET")
@@ -42,8 +52,16 @@ func main() {
 
 func getBooks(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	slices.SortFunc(books, func(a, b Book) int { return a.ID - b.ID })
-	err := json.NewEncoder(w).Encode(books)
+
+	books := []Book{}
+	err := db.Select(&books, "SELECT * FROM books ORDER BY title")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+
+	err = json.NewEncoder(w).Encode(books)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -57,13 +75,16 @@ func getBook(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
-	idx := slices.IndexFunc(books, func(b Book) bool { return b.ID == id })
-	if idx == -1 {
+
+	var book Book
+	err = db.Get(&book, "SELECT * FROM books WHERE id=?", id)
+	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(books[idx])
+	err = json.NewEncoder(w).Encode(book)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -81,14 +102,13 @@ func addBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idx := slices.IndexFunc(books, func(b Book) bool { return b.ID == book.ID })
-	if idx != -1 {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte("Book ID already exists\n"))
+	_, err = db.NamedExec("INSERT INTO books (title, author, year) VALUES (:title, :author, :year)", book)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
-	books = append(books, book)
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -99,11 +119,7 @@ func updateBook(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
-	idx := slices.IndexFunc(books, func(b Book) bool { return b.ID == id })
-	if idx == -1 {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
+
 	var book Book
 	decoder := json.NewDecoder(r.Body)
 	err = decoder.Decode(&book)
@@ -112,8 +128,22 @@ func updateBook(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
-	book.ID = id // keep the same ID
-	books[idx] = book
+
+	var oBook Book
+	err = db.Get(&oBook, "SELECT * FROM books WHERE id = ?", id)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	book.ID = id
+	_, err = db.NamedExec("UPDATE books SET title=:title, author=:author, year=:year WHERE id = :id", book)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -124,11 +154,20 @@ func deleteBook(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
-	idx := slices.IndexFunc(books, func(b Book) bool { return b.ID == id })
-	if idx == -1 {
+
+	var book Book
+	err = db.Get(&book, "SELECT * FROM books WHERE id = ?", id)
+	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	books = slices.Delete(books, idx, idx+1)
+
+	_, err = db.Exec("DELETE FROM books WHERE id = ?", id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(err.Error()))
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
