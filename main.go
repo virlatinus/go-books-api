@@ -3,42 +3,40 @@ package main
 import (
 	"encoding/json"
 	"github.com/MadAppGang/httplog"
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
-	"github.com/jmoiron/sqlx"
-	_ "github.com/jmoiron/sqlx"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 	"log"
 	"net/http"
 	"strconv"
-	"time"
 )
 
 type Book struct {
-	ID     int    `json:"id" db:"id"`
-	Title  string `json:"title" db:"title"`
-	Author string `json:"author" db:"author"`
-	Year   int    `json:"year" db:"year"`
+	gorm.Model
+	Title  string `json:"title" gorm:"not null,unique,index:title_idx"`
+	Author string `json:"author" gorm:"not null"`
+	Year   int    `json:"year" gorm:"not null"`
 }
 
-var db *sqlx.DB
+var db *gorm.DB
 
 func main() {
 	router := mux.NewRouter()
-
 	var err error
-	db, err = sqlx.Connect("mysql", "books:books@/books")
+	dsn := "books:books@tcp(localhost:3306)/books?charset=utf8mb4&parseTime=True&loc=Local"
+	db, err = gorm.Open(mysql.New(mysql.Config{
+		DSN:               dsn,
+		DefaultStringSize: 256, // default size for string fields
+	}), &gorm.Config{})
 	if err != nil {
 		panic(err)
 	}
-	db.SetConnMaxLifetime(time.Minute * 3)
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(10)
-	defer func(db *sqlx.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
-	}(db)
+
+	// Migrate the schema
+	err = db.AutoMigrate(&Book{})
+	if err != nil {
+		panic(err)
+	}
 
 	router.Use(httplog.Logger)
 	router.HandleFunc("/books", getBooks).Methods("GET")
@@ -51,16 +49,15 @@ func main() {
 }
 
 func getBooks(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	books := []Book{}
-	err := db.Select(&books, "SELECT * FROM books ORDER BY title")
+	var books []Book
+	err := db.Find(&books).Error
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(books)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -75,14 +72,12 @@ func getBook(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(err.Error()))
 		return
 	}
-
 	var book Book
-	err = db.Get(&book, "SELECT * FROM books WHERE id=?", id)
+	err = db.First(&book, id).Error
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	err = json.NewEncoder(w).Encode(book)
 	if err != nil {
@@ -102,7 +97,7 @@ func addBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = db.NamedExec("INSERT INTO books (title, author, year) VALUES (:title, :author, :year)", book)
+	err = db.Create(&book).Error
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -121,6 +116,12 @@ func updateBook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var book Book
+	err = db.First(&book, id).Error
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	err = decoder.Decode(&book)
 	if err != nil {
@@ -129,15 +130,9 @@ func updateBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var oBook Book
-	err = db.Get(&oBook, "SELECT * FROM books WHERE id = ?", id)
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
+	book.ID = uint(id)
 
-	book.ID = id
-	_, err = db.NamedExec("UPDATE books SET title=:title, author=:author, year=:year WHERE id = :id", book)
+	err = db.Save(&book).Error
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
@@ -156,13 +151,13 @@ func deleteBook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var book Book
-	err = db.Get(&book, "SELECT * FROM books WHERE id = ?", id)
+	err = db.First(&book, id).Error
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	_, err = db.Exec("DELETE FROM books WHERE id = ?", id)
+	err = db.Delete(&book).Error
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(err.Error()))
