@@ -22,13 +22,7 @@ var books []Book
 func main() {
 	router := mux.NewRouter()
 
-	books = append(books,
-		Book{ID: 1, Title: "1984", Author: "George Orwell", Year: 1949},
-		Book{ID: 2, Title: "To Kill a Mockingbird", Author: "Harper Lee", Year: 1960},
-		Book{ID: 3, Title: "The Great Gatsby", Author: "F. Scott Fitzgerald", Year: 1925},
-		Book{ID: 4, Title: "Pride and Prejudice", Author: "Jane Austen", Year: 1813},
-		Book{ID: 5, Title: "The Catcher in the Rye", Author: "J.D. Salinger", Year: 1951},
-	)
+	addBooks()
 
 	router.Use(httplog.Logger)
 	router.HandleFunc("/books", getBooks).Methods("GET")
@@ -38,6 +32,16 @@ func main() {
 	router.HandleFunc("/books/{id}", deleteBook).Methods("DELETE")
 
 	log.Fatal(http.ListenAndServe(":8000", router))
+}
+
+func addBooks() {
+	books = append(books,
+		Book{ID: 1, Title: "1984", Author: "George Orwell", Year: 1949},
+		Book{ID: 2, Title: "To Kill a Mockingbird", Author: "Harper Lee", Year: 1960},
+		Book{ID: 3, Title: "The Great Gatsby", Author: "F. Scott Fitzgerald", Year: 1925},
+		Book{ID: 4, Title: "Pride and Prejudice", Author: "Jane Austen", Year: 1813},
+		Book{ID: 5, Title: "The Catcher in the Rye", Author: "J.D. Salinger", Year: 1951},
+	)
 }
 
 func getBooks(w http.ResponseWriter, r *http.Request) {
